@@ -1,3 +1,5 @@
+#!python
+
 #
 # vdbfs.py
 # version 0.3
@@ -18,6 +20,9 @@ Overview:
     
 Pre-requisites:
     pip install awscli==1.36.17 boto3==1.35.76 databricks-sdk==0.38.0
+    Permissions on Volume:
+        GRANT READ VOLUME ON VOLUME catalog.schema.volume_name TO `first.lastname@example.com` or
+        GRANT WRITE VOLUME ON VOLUME catalog.schema.volume_name TO `first.lastname@example.com`
 
 Usage:
     databricks auth login --profile <your databricks profile>
@@ -25,6 +30,7 @@ Usage:
     python {sys.argv[0]} ls dbfs:/Volumes/singlecell/cellxgene/raw_hd5
     python {sys.argv[0]} cp /Volumes/singlecell/cellxgene/raw_hd5/csvs/21d3e683-80a4-4d9b-bc89-ebb2df513dde_obs.csv x.csv
     python {sys.argv[0]} creds dbfs:/Volumes/singlecell/cellxgene/raw_hd5
+    python {sys.argv[0]} put ./x.csv dbfs:/Volumes/singlecell/cellxgene/processed_h5ad/x.csv
 """
     return usage
 
@@ -54,8 +60,8 @@ def temp_volume_credentials_get(w, volume_id, operation):
         }
     )
 
-def vol_parts(volume_path:str, url=''):
-    parts = volume_path.split('/')
+def vol_parts(source_path:str, url=''):
+    parts = source_path.split('/')
     catalog = parts[2]
     schema = parts[3]
     volume = parts[4]
@@ -79,14 +85,26 @@ def get_creds(w, volume_full_name:str, operation="READ_VOLUME"):
     response = temp_volume_credentials_get(w, v.volume_id, operation)  
     return response['aws_temp_credentials'], response['url']
 
-def do_command(w, command:str, volume_path:str, destination:str, host:str):
+def do_show_creds(w, source_path:str, operation="READ_VOLUME"):
+    volume_full_name,rel_path = vol_parts(source_path)
+    creds,url = get_creds(w, volume_full_name=volume_full_name, operation=operation)
+    print(f"""
+export AWS_ACCESS_KEY_ID="{creds['access_key_id']}"
+export AWS_SECRET_ACCESS_KEY="{creds['secret_access_key']}"
+export AWS_SESSION_TOKEN="{creds['session_token']}"
+
+aws s3 ls --recursive {url}
+        """)
+
+
+def do_command(w, command:str, source_path:str, destination:str, host:str):
     """
     Connect to Databricks, get temporary credentials, then setup aws cli command and run it.
 
     Args:
         w (WorkspaceClient): Databricks workspace connection object.
         command (str): Short command like 'ls' or 'cp'
-        volume_path (str): Full databricks dbfs path to volume and file 'dbfs:/Volumes/catalog/schema/volume/path/file'
+        source_path (str): Full databricks dbfs path to volume and file 'dbfs:/Volumes/catalog/schema/volume/path/file'
         destination (str): Local filesystem destination
         host (str): Databricks host url (without trailing /)
     """
@@ -94,37 +112,40 @@ def do_command(w, command:str, volume_path:str, destination:str, host:str):
     assert command is not None
 
     try:
-        if command in ['ls', 'cp']:
-            direction = "download" if "/Volumes" in volume_path else "upload"
-            operation = 'WRITE_VOLUME' if direction == "upload" else 'READ_VOLUME'
+        direction = "download" if "/Volumes" in source_path else "upload"
+        operation = 'WRITE_VOLUME' if direction == "upload" else 'READ_VOLUME'
 
-            volume_full_name,rel_path = vol_parts(volume_path)
+        if command == 'ls':
+            volume_full_name,rel_path = vol_parts(source_path)
             creds,url = get_creds(w, volume_full_name=volume_full_name, operation=operation)
-            
+            s3_url = f"{url}{rel_path}"
+            shell_command = f"aws s3 {command} {s3_url}"
+        if command == 'cp':
+            volume_full_name,rel_path = vol_parts(source_path)
+            creds,url = get_creds(w, volume_full_name=volume_full_name, operation=operation)
+            s3_url = f"{url}{rel_path}"
+            shell_command = f"aws s3 {command} {s3_url} {destination}"
+        if command == 'creds':
+            shell_command = None
+            operation = 'WRITE_VOLUME'
+            do_show_creds(w, source_path, operation=operation)
+
+        if command == 'put':
+            volume_full_name,rel_path = vol_parts(destination)
+            creds,url = get_creds(w, volume_full_name=volume_full_name, operation=operation)
+            s3_url = f"{url}{rel_path}"
+            shell_command = f"aws s3 cp .{rel_path} {s3_url}"
+        
+        if shell_command:
+            print(f"\n\nRunning command \n{shell_command}\n...")
             # stuff temp credentials into environment to be picked up by aws cli subprocess
             os.environ["AWS_ACCESS_KEY_ID"]=creds['access_key_id']
             os.environ["AWS_SECRET_ACCESS_KEY"]=creds['secret_access_key']
             os.environ["AWS_SESSION_TOKEN"]=creds['session_token']
-
-            s3_url = f"{url}{rel_path}"
-            shell_command = f"aws s3 {command} {s3_url} {destination or ''}"
-            print(f"\n\nRunning command \n{shell_command}\n...")
             results = subprocess.run(shell_command.split())
-        
-        if command == "creds":
-            operation = 'WRITE_VOLUME' 
-            volume_full_name,rel_path = vol_parts(volume_path)
-            creds,url = get_creds(w, volume_full_name=volume_full_name, operation=operation)
-            print(f"""
-export AWS_ACCESS_KEY_ID="{creds['access_key_id']}"
-export AWS_SECRET_ACCESS_KEY="{creds['secret_access_key']}"
-export AWS_SESSION_TOKEN="{creds['session_token']}"
-
-aws s3 ls --recursive {url}
-                  """)
             
     except Exception as e:
-        logging.error(f"do_command failed: {e}")
+        logging.error(f"do_command {command} failed: {e}")
 
 def localhost():
     return socket.gethostname()
@@ -179,27 +200,32 @@ def handle_inputs():
         print(f"Error: DATABRICKS_HOST is not set\n\n {usage()}")
         exit(2)
 
-    command = volume_path = destination = None
+    command = source_path = destination = None
     if len(sys.argv) >= 2:
         command = sys.argv[1]
     
     if command == 'ls':
-        volume_path = sys.argv[2]
-        assert volume_path is not None
+        source_path = sys.argv[2]
+        assert source_path is not None
     elif command == 'cp':
-        volume_path = sys.argv[2]
+        source_path = sys.argv[2]
         destination = sys.argv[3]
         assert destination is not None
     elif command == 'creds':
-        volume_path = sys.argv[2]
-        assert volume_path is not None
+        source_path = sys.argv[2]
+        assert source_path is not None
+    elif command == 'put':
+        source_path = sys.argv[2]
+        destination = sys.argv[3]
+        assert source_path is not None
+        assert destination is not None
     else:
-        logging.info(f"Exiting on usage {host} {command} {volume_path} {destination}")
+        logging.info(f"Exiting on usage {host} {command} {source_path} {destination}")
         print(usage())
         exit(1)
 
-    logging.info(f"{host}, {command}, {volume_path}, {destination}")
-    return host, command, volume_path, destination
+    logging.info(f"{host}, {command}, {source_path}, {destination}")
+    return host, command, source_path, destination
 
 ## ---------
 if __name__ == "__main__":
@@ -215,10 +241,10 @@ if __name__ == "__main__":
     logging.basicConfig(stream=sys.stderr,
                         level=logging.INFO,
                         format='%(asctime)s [%(name)s][%(levelname)s] %(message)s')
-    logging.getLogger('databricks.sdk').setLevel(logging.INFO)
+    logging.getLogger('databricks.sdk').setLevel(logging.DEBUG)
     # set loglevel to DEBUG for debugging
 
-    host, command, volume_path, destination = handle_inputs()
+    host, command, source_path, destination = handle_inputs()
     
     #display usage before non-default imports
     try:
@@ -232,13 +258,13 @@ if __name__ == "__main__":
     try:
         # do command and record lineage
         w=WorkspaceClient(host=host)
-        do_command(w, command=command, volume_path=volume_path, destination=destination, host=host)
+        do_command(w, command=command, source_path=source_path, destination=destination, host=host)
         if command in ['cp']:
             cguid = client_guid()
             do_lineage(
                 w,
                 cguid=cguid,
-                source_path=volume_path,
+                source_path=source_path,
                 destination_path=destination
                 )
     except Exception as e:
