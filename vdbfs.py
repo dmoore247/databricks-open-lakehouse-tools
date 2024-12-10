@@ -2,7 +2,7 @@
 
 #
 # vdbfs.py
-# version 0.3
+# version 0.4
 #
 def usage():
     usage=f"""
