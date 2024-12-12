@@ -1,4 +1,3 @@
-# zcola
-Zero Copy Open Lakehouse Architecture
+# Zero Copy Open Lakehouse Architecture
 
-- vdbfs.py: Test `temporary-volume-credentials` api with byol apis
+- vdbfs.py: Well governed `cp`, `put`, and access to AWS S3 via the open `temporary-volume-credentials`
