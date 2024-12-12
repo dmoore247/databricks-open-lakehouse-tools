@@ -1,8 +1,8 @@
-#!python
+#!python3
 
 #
 # vdbfs.py
-# version 0.4
+# version 0.5
 #
 def usage():
     usage=f"""
@@ -26,7 +26,7 @@ Pre-requisites:
 
 Usage:
     databricks auth login --profile <your databricks profile>
-    export HOST=<databricks workspace url>
+    export DATABRICKS_HOST=<databricks workspace url>
     python {sys.argv[0]} ls dbfs:/Volumes/singlecell/cellxgene/raw_hd5
     python {sys.argv[0]} cp /Volumes/singlecell/cellxgene/raw_hd5/csvs/21d3e683-80a4-4d9b-bc89-ebb2df513dde_obs.csv x.csv
     python {sys.argv[0]} creds dbfs:/Volumes/singlecell/cellxgene/raw_hd5
@@ -134,7 +134,7 @@ def do_command(w, command:str, source_path:str, destination:str, host:str):
             volume_full_name,rel_path = vol_parts(destination)
             creds,url = get_creds(w, volume_full_name=volume_full_name, operation=operation)
             s3_url = f"{url}{rel_path}"
-            shell_command = f"aws s3 cp .{rel_path} {s3_url}"
+            shell_command = f"aws s3 cp {source_path} {s3_url}"
         
         if shell_command:
             print(f"\n\nRunning command \n{shell_command}\n...")
@@ -151,14 +151,47 @@ def localhost():
     return socket.gethostname()
 
 def url(file_name):
-    return f"file://{w.current_user.me().user_name}@{localhost()}/{os.getcwd()}/{file_name}"
+    return f"file://{w.current_user.me().user_name}@{localhost()}{os.getcwd()}/{file_name}"
 
-def client_guid():
-    return f"download/{uuid.uuid4()}"
+def client_guid(direction="download"):
+    return f"{direction}/{uuid.uuid4()}"
+
+def get_lineage_source(cguid, source_path):
+    if "/Volumes" in source_path:
+        return  {
+                    "provider_type": "DATABRICKS",
+                    "databricks_type": "PATH",
+                    "guid": source_path
+            }
+    else:
+        return {
+                    "provider_type": "CUSTOM",
+                    "guid": cguid
+            }
+
+def get_lineage_destination(cguid, destination_path):
+    if "/Volumes" in destination_path:
+        return   {
+                    "provider_type": "DATABRICKS",
+                    "databricks_type": "PATH",
+                    "guid": destination_path
+            }
+    else:
+        return {
+                    "provider_type": "CUSTOM",
+                    "guid": cguid
+            }
 
 def do_lineage(w, cguid, source_path, destination_path):
     direction = "download" if "/Volumes" in source_path else "upload"
-    return byol_create(data={
+    cguid = client_guid(direction)
+    last_modification_time = create_time = size = None
+    if direction == "upload":
+        stat = os.stat(source_path)
+        size = stat.st_size
+        last_modification_time = stat.st_mtime
+        create_time = stat.st_ctime
+    data={
         "entities": [
             {
             "entity_id": {
@@ -166,31 +199,28 @@ def do_lineage(w, cguid, source_path, destination_path):
                 "guid": cguid
             },
             "entity_type": f"file/{direction}",
-            "display_name": f"{destination_path}",
+            "display_name": f"{source_path}",
             "url": url(destination_path),
-            "description": "downloads",
+            "description": " ".join(sys.argv),
             "properties": json.dumps({
                 "source_path": source_path,
                 "destination_path": destination_path,
-                "destination_host": localhost(),
-                "destination_cwd":  os.getcwd()
+                "localhost": localhost(),
+                "cwd":  os.getcwd(),
+                "file_size_bytes":size,
+                "create_time":create_time,
+                "last_modification_time": last_modification_time,                
             })
             }
         ],
-        "relationships": [
-            {
-                "source": {
-                    "provider_type": "DATABRICKS",
-                    "databricks_type": "PATH",
-                    "guid": "dbfs:/Volumes/singlecell/cellxgene/raw_hd5"
-                },
-                "target": {
-                    "provider_type": "CUSTOM",
-                    "guid": cguid
-                }
-            }
-        ]
-        })
+        "relationships": [{
+                "source": get_lineage_source(cguid, source_path),
+                "target": get_lineage_destination(cguid, destination_path)
+        }]
+    }
+    # return non empty keys
+    print(data)
+    return byol_create(data)
 
 
 def handle_inputs():
@@ -257,9 +287,9 @@ if __name__ == "__main__":
 
     try:
         # do command and record lineage
-        w=WorkspaceClient(host=host)
+        w=WorkspaceClient(debug_truncate_bytes=1024, debug_headers=False, host=host)
         do_command(w, command=command, source_path=source_path, destination=destination, host=host)
-        if command in ['cp']:
+        if command in ['cp', 'put']:
             cguid = client_guid()
             do_lineage(
                 w,
