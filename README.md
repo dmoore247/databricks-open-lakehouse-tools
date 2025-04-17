@@ -19,3 +19,4 @@
   
   Pre-requisites:
   - Login to Databricks `databricks auth login --profile <DATABRICKS_CONFIG_PROFILE>`
+  - `pip install -r uploader-requirements.txt`
