@@ -11,3 +11,11 @@
   -  Databricks file upload api for easy (large) file upload support.
   -  A volume for secure temp storage,
   -  The MERGE INTO sql statement to merge file contents into a open table
+  
+  Requires env variables:
+  - DATABRICKS_CONFIG_PROFILE
+  - DATABRICKS_HTTP_PATH
+  - DATABRICKS_SERVER_HOSTNAME
+  
+  Pre-requisites:
+  - Login to Databricks `databricks auth login --profile <DATABRICKS_CONFIG_PROFILE>`
